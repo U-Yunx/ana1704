@@ -1,10 +1,11 @@
 # Cloudflare Pages configuration for ANA24.
-# Deployed via `npm run deploy` → `wrangler pages deploy dist --project-name ana24`.
-name = "ana24"
-pages_build_output_dir = "dist"
-compatibility_date = "2024-11-01"
+#
+# The GitHub Actions workflow (.github/workflows/deploy-cloudflare.yml) runs
+# `wrangler pages deploy` on every push to `main`, using the build output
+# directory below. The same config lets you deploy locally:
+#
+#   npx wrangler pages deploy
 
-# Public static assets never need secrets. All privileged logic (market data,
-# broker bridges, broker tokens) runs in Supabase Edge Functions that read
-# their own secrets server-side.
-[vars]
+name = "ana24"
+compatibility_date = "2025-06-01"
+pages_build_output_dir = "dist"

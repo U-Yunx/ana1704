@@ -9,7 +9,8 @@ MetaTrader — plus a referral/commission system with manual payouts.
 - **Frontend** — React 18 + TypeScript + Vite + Tailwind CSS v4
 - **Charts** — lightweight-charts (candles, equity curves)
 - **Backend** — Supabase (Auth, Postgres, Realtime, Edge Functions)
-- **Deploy** — NativelyAI platform (static build via `npm run build`)
+- **Deploy** — Cloudflare Pages, auto-deployed from GitHub on every push to
+  `main` (static build via `npm run build`; see `.github/workflows/deploy-cloudflare.yml`)
 
 ## Getting started
 
@@ -42,6 +43,34 @@ the "Supabase connection required" screen.
 - `supabase/functions/` — Edge Functions: `market-data` (provider proxy),
   `broker-oanda` / `broker-mt` (live broker bridges), `broker-token`
   (scoped robot API tokens), `news-ticker`.
+
+## Deploying to Cloudflare Pages
+
+The repo ships a GitHub Actions workflow (`.github/workflows/deploy-cloudflare.yml`)
+that builds the app and deploys it to Cloudflare Pages automatically on every
+push to `main` (SPA fallback and security headers come from `public/_redirects`
+and `public/_headers`, which Cloudflare Pages honors natively).
+
+### One-time setup
+
+1. **Create the Pages project** in the Cloudflare dashboard
+   (Workers & Pages → Create → Pages → connect a Git repository), or let the
+   first workflow run create it. The workflow deploys to a project named
+   `ana24` (see `wrangler.toml`).
+2. **Create an API token** with the *Cloudflare Pages — Edit* permission:
+   Dashboard → My Profile → API Tokens → Create Token.
+3. **Add two GitHub Actions secrets** (Settings → Secrets and variables →
+   Actions) — never put these in `.env.local` or a `VITE_` variable; they are
+   CI-only and must not reach the browser:
+   - `CLOUDFLARE_API_TOKEN` — the API token from step 2.
+   - `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID (dashboard,
+     right-hand sidebar).
+
+That's it. Push to `main` and the workflow runs `npm ci` → `npm test` →
+`npm run build` → `wrangler pages deploy ./dist --project-name=ana24`.
+
+To deploy locally instead: `npx wrangler pages deploy` (reads
+`wrangler.toml`); log in first with `npx wrangler login`.
 
 ## Security
 
