@@ -9,7 +9,7 @@ MetaTrader — plus a referral/commission system with manual payouts.
 - **Frontend** — React 18 + TypeScript + Vite + Tailwind CSS v4
 - **Charts** — lightweight-charts (candles, equity curves)
 - **Backend** — Supabase (Auth, Postgres, Realtime, Edge Functions)
-- **Deploy** — Cloudflare Pages
+- **Deploy** — NativelyAI platform (static build via `npm run build`)
 
 ## Getting started
 
@@ -29,7 +29,6 @@ the "Supabase connection required" screen.
 | `npm run dev`     | Start the Vite dev server                 |
 | `npm run build`   | Production build to `dist/`               |
 | `npm test`        | Run the Vitest unit tests                 |
-| `npm run deploy`  | Build + deploy to Cloudflare Pages        |
 
 ## Architecture
 
