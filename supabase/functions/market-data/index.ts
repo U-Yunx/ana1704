@@ -10,19 +10,24 @@ import { corsHeaders } from "jsr:@supabase/supabase-js@2/cors";
 // caches responses so dashboard polling and repeated signals don't burn the
 // free-tier credit budget.
 //
-// v10 — multiple providers + automatic fallback:
+// v11 — multiple providers + automatic fallback + one-click free source:
 //   * A small provider registry (Twelve Data = default, Finnhub, Alpha Vantage,
-//     Polygon.io) plus a free keyless source (Yahoo Finance) and a broker-derived
-//     source (OANDA — auto-generated from the admin's broker trader account on
-//     the Brokers page) lets an admin pick which provider feeds the platform.
+//     Polygon.io) plus a free keyless source (Binance public API for crypto +
+//     Yahoo Finance for FX) and a broker-derived source (OANDA — auto-generated
+//     from the admin's broker trader account on the Brokers page) lets an admin
+//     pick which provider feeds the platform.
+//   * Any signed-in user can activate the free source from the Configuration
+//     page (`activate_free`) — no signup, no API key. It never overrides a
+//     provider that already has a stored key: the free source simply stays the
+//     automatic fallback in that case.
 //   * Each provider's API key is stored server-side in `app_secrets` under
 //     `market_data_<provider>`, and the active provider is recorded in
 //     `market_data_provider`. Keys are never exposed to the browser.
 //   * Quotes / time-series route through an automatic fallback chain: the
 //     selected provider is tried first, then other configured keyed providers,
-//     then free keyless sources (Yahoo). If the active provider stops working
-//     (expired key, rate limit, upstream error) the next usable provider serves
-//     the request and is persisted as the new active one, so the platform keeps
+//     then free keyless sources. If the active provider stops working (expired
+//     key, rate limit, upstream error) the next usable provider serves the
+//     request and is persisted as the new active one, so the platform keeps
 //     serving market data without manual intervention.
 //   * The cache is namespaced per provider so switching never serves the other
 //     provider's data, and the shared rate gate + in-memory bucket stay as-is.
@@ -56,6 +61,7 @@ const FH_BASE = "https://finnhub.io/api/v1";
 const AV_BASE = "https://www.alphavantage.co/query";
 const POLY_BASE = "https://api.polygon.io";
 const YH_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
+const BN_BASE = "https://api.binance.com/api/v3";
 const OANDA_PRACTICE = "https://api-fxpractice.oanda.com";
 const OANDA_LIVE = "https://api-fxtrade.oanda.com";
 const MAX_OUTPUTSIZE = 5000;
