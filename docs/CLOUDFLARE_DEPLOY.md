@@ -24,6 +24,25 @@ npm run deploy      # npm run build && wrangler pages deploy dist --project-name
 `scripts/check-deploy-env.mjs` exits non-zero if a required variable is
 missing, so a broken deploy never ships.
 
+## CI/CD (GitHub Actions)
+
+`.github/workflows/deploy.yml` automates the whole flow on every push to `main`:
+`npm ci` → `npm run predeploy` (env guard) → `npm run build` →
+`wrangler pages deploy dist --project-name ana24`.
+
+Before the first CI deploy, add to the GitHub repo
+(Settings → Secrets and variables → Actions):
+
+| Scope | Name | Value |
+| --- | --- | --- |
+| Secret | `CLOUDFLARE_API_TOKEN` | Cloudflare API token with **Cloudflare Pages: Edit** permission |
+| Secret | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID (from the dash URL) |
+| Secret or variable | `VITE_SUPABASE_URL` | `https://<project-ref>.supabase.co` — public |
+| Secret or variable | `VITE_SUPABASE_ANON_KEY` | Publishable/anon key — public |
+
+The Cloudflare token is a real secret and only ever exists in GitHub secrets /
+Cloudflare; it is never baked into the bundle.
+
 ## Routing
 
 `public/_redirects` serves `/index.html` for every path (SPA fallback) so
