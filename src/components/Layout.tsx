@@ -1,1 +1,5 @@
-nZ³÷úïİ¶{ßã7ß†Ûãvùï={WÚÛ»l
+import { ReactNode } from "react";
+
+export default function Layout({ children }: { children: ReactNode }) {
+  return <div className="layout">{children}</div>;
+}
