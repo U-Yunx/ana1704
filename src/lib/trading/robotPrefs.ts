@@ -19,7 +19,7 @@ const DEFAULTS: RobotPrefs = {
   overallMaxLossUsd: 0,
   tradeMode: 'sequential',
   maxPerPair: 1,
-  maxOpenTrades: 3,
+  maxOpenTrades: 0,
 }
 
 function num(v: unknown, fallback: number): number {
@@ -43,7 +43,8 @@ export function loadRobotPrefs(): RobotPrefs {
       overallMaxLossUsd: Math.max(0, num(p.overallMaxLossUsd, 0)),
       tradeMode: p.tradeMode === 'concurrent' ? 'concurrent' : 'sequential',
       maxPerPair: Math.max(1, Math.round(num(p.maxPerPair, DEFAULTS.maxPerPair))),
-      maxOpenTrades: Math.max(1, Math.round(num(p.maxOpenTrades, DEFAULTS.maxOpenTrades))),
+      // 0 = unlimited (no global cap); any positive number is a hard cap.
+      maxOpenTrades: Math.max(0, Math.round(num(p.maxOpenTrades, DEFAULTS.maxOpenTrades))),
     }
   } catch {
     return DEFAULTS

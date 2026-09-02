@@ -280,6 +280,7 @@ export function Trading() {
     prefs,
     setMethod,
     setDuration,
+    setPairs,
     togglePair,
     setAutoPickPairs,
     setPairCount,
@@ -787,7 +788,9 @@ export function Trading() {
               {prefs.tradeMode === 'concurrent' && (
                 <Badge className="border-accent/40 bg-accent/10 text-accent">Max {prefs.maxPerPair}/pair</Badge>
               )}
-              <Badge className="border-border bg-muted text-muted-foreground">Max {prefs.maxOpenTrades} total</Badge>
+              <Badge className="border-border bg-muted text-muted-foreground">
+                Max {prefs.maxOpenTrades > 0 ? prefs.maxOpenTrades : 'unlimited'} total
+              </Badge>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {scanPairs.map((sym) => {
@@ -907,8 +910,26 @@ export function Trading() {
 
           {/* Multi-pair selector */}
           <div>
-            <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Pairs to trade · {robotPairs.length} selected
+            <span className="mb-2 flex items-center justify-between gap-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              <span>Pairs to trade · {robotPairs.length} selected</span>
+              <span className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setPairs(WATCHLIST.map((p) => p.symbol))}
+                  disabled={robotPairs.length === WATCHLIST.length}
+                  className="cursor-pointer rounded border border-border bg-secondary/40 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-muted-foreground transition-colors duration-150 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPairs([])}
+                  disabled={robotPairs.length === 0}
+                  className="cursor-pointer rounded border border-border bg-secondary/40 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-muted-foreground transition-colors duration-150 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Clear
+                </button>
+              </span>
             </span>
             <div className="flex flex-wrap gap-2" role="group" aria-label="Pairs the robot trades">
               {WATCHLIST.map((p) => {

@@ -230,7 +230,8 @@ export function closeAllPositions(
 
 /** Close only the positions the robot opened (strategy-tagged), leaving manual
  * positions untouched. Used when the robot stops — a stopped robot never leaves
- * open trades it started. */
+ * open trades it started, but manual trades the user placed stay on the book.
+ * Manual trades are tagged with strategy 'manual', so they are always excluded. */
 export function closeRobotPositions(
   state: AccountState,
   rates: RatesMap,
@@ -238,7 +239,7 @@ export function closeRobotPositions(
   let next = state
   const closed: ClosedTrade[] = []
   for (const p of state.positions) {
-    if (!p.strategy) continue
+    if (!p.strategy || p.strategy === 'manual') continue
     const cur = rates[p.symbol] ?? p.entryPrice
     const res = closePosition(next, p.id, { price: cur, reason: 'robot_stop', rates })
     if (res.trade) closed.push(res.trade)

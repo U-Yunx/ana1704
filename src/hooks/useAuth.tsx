@@ -14,6 +14,13 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<{ error: string | null }>
   signOut: () => Promise<void>
   updatePassword: (newPassword: string) => Promise<string | null>
+  /** Send a password-reset email to the address (Supabase auth). */
+  resetPasswordForEmail: (email: string) => Promise<string | null>
+  /** True while the user has arrived via a password-recovery link (Supabase
+   * fires PASSWORD_RECOVERY). The app should prompt for a new password. */
+  isPasswordRecovery: boolean
+  /** Clear the password-recovery flag once the user has set a new password. */
+  clearRecovery: () => void
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -22,11 +29,15 @@ const AuthContext = createContext<AuthContextValue>({
   signIn: async () => ({ error: 'Service not configured.' }),
   signOut: async () => {},
   updatePassword: async () => 'Service not configured.',
+  resetPasswordForEmail: async () => 'Service not configured.',
+  isPasswordRecovery: false,
+  clearRecovery: () => {},
 })
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false)
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -39,8 +50,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(data.session?.user ?? null)
       setLoading(false)
     })
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null)
+      // The user clicked a password-recovery link from their email — the
+      // session is real but they must set a new password before trading.
+      if (event === 'PASSWORD_RECOVERY') setIsPasswordRecovery(true)
       setLoading(false)
     })
     return () => {
@@ -57,6 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     if (isSupabaseConfigured) await supabase.auth.signOut()
+    setIsPasswordRecovery(false)
   }, [])
 
   const updatePassword = useCallback(async (newPassword: string) => {
@@ -65,9 +80,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return error?.message ?? null
   }, [])
 
+  const resetPasswordForEmail = useCallback(async (email: string) => {
+    if (!isSupabaseConfigured) return 'Service not configured.'
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    })
+    return error?.message ?? null
+  }, [])
+
+  const clearRecovery = useCallback(() => setIsPasswordRecovery(false), [])
+
   const value = useMemo(
-    () => ({ user, loading, signIn, signOut, updatePassword }),
-    [user, loading, signIn, signOut, updatePassword],
+    () => ({ user, loading, signIn, signOut, updatePassword, resetPasswordForEmail, isPasswordRecovery, clearRecovery }),
+    [user, loading, signIn, signOut, updatePassword, resetPasswordForEmail, isPasswordRecovery, clearRecovery],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

@@ -150,7 +150,7 @@ export const DEFAULT_ROBOT_CONFIG: RobotConfig = {
   pairs: [],
   tradeMode: 'sequential',
   maxPerPair: 1,
-  maxOpenTrades: 3,
+  maxOpenTrades: 0,
 }
 
 /** Input for a single pair inside a multi-pair robot cycle. */

@@ -20,6 +20,7 @@ export function Configuration() {
   const {
     prefs,
     setMethod,
+    setPairs,
     togglePair,
     setAutoPickPairs,
     setPairCount,
@@ -90,15 +91,37 @@ export function Configuration() {
         <Card>
           <CardHeader>
             <CardTitle>Pairs to trade</CardTitle>
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                checked={prefs.autoPickPairs}
-                onChange={(e) => setAutoPickPairs(e.target.checked)}
-                className="h-4 w-4 cursor-pointer accent-[var(--color-accent)]"
-              />
-              Auto-pick strongest
-            </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  checked={prefs.autoPickPairs}
+                  onChange={(e) => setAutoPickPairs(e.target.checked)}
+                  className="h-4 w-4 cursor-pointer accent-[var(--color-accent)]"
+                />
+                Auto-pick strongest
+              </label>
+              {!prefs.autoPickPairs && (
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setPairs(WATCHLIST.map((p) => p.symbol))}
+                    disabled={prefs.pairs.length === WATCHLIST.length}
+                  >
+                    Select all
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setPairs([])}
+                    disabled={prefs.pairs.length === 0}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
             {prefs.autoPickPairs ? (
@@ -194,19 +217,26 @@ export function Configuration() {
               <Input
                 label="Max open trades (whole robot)"
                 type="number"
-                min={1}
+                min={0}
                 step={1}
                 value={prefs.maxOpenTrades}
-                onChange={(e) => setMaxOpenTrades(Math.max(1, Math.round(Number(e.target.value))))}
+                onChange={(e) => setMaxOpenTrades(Math.max(0, Math.round(Number(e.target.value))))}
               />
             </div>
             <p className="mt-3 text-xs text-muted-foreground">
               {prefs.tradeMode === 'sequential'
                 ? 'Sequential holds a single position per pair, so the per-pair cap is fixed at 1 — the global cap above still limits the whole robot.'
-                : `Concurrent can hold up to ${prefs.maxPerPair} position${prefs.maxPerPair === 1 ? '' : 's'} on each pair, bounded by the ${prefs.maxOpenTrades} global open-trade cap.`}
+                : `Concurrent can hold up to ${prefs.maxPerPair} position${prefs.maxPerPair === 1 ? '' : 's'} on each pair${prefs.maxOpenTrades > 0 ? `, bounded by the ${prefs.maxOpenTrades} global open-trade cap` : ' with no global open-trade cap'}.`}
               {' '}Both caps are enforced by the trading engine on every cycle, so a busy market can never over-leverage the account.
             </p>
-            {prefs.tradeMode === 'concurrent' && prefs.maxPerPair > prefs.maxOpenTrades && (
+            {prefs.maxOpenTrades === 0 && (
+              <p className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
+                <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true" />
+                Set to 0 for unlimited open trades — the robot may open as many positions as signals qualify,
+                still bounded by the per-pair cap and your risk settings.
+              </p>
+            )}
+            {prefs.tradeMode === 'concurrent' && prefs.maxOpenTrades > 0 && prefs.maxPerPair > prefs.maxOpenTrades && (
               <p role="alert" className="mt-2 flex items-start gap-2 rounded-lg border border-amber/40 bg-amber/10 px-3 py-2 text-xs text-amber">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 Max per pair ({prefs.maxPerPair}) is higher than the global cap ({prefs.maxOpenTrades}). The global cap
