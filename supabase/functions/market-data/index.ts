@@ -121,9 +121,15 @@ const TTL_MS: Record<string, number> = {
   "4h": 30 * 60_000,
   "1day": 12 * 60 * 60_000,
 };
-// Quotes: keep them fresh for 5 minutes — a full 18-symbol rotation at 2
-// symbols/request fits comfortably inside the shared 8/min gate.
+// Keyed providers: keep quotes fresh for 5 minutes — a full 18-symbol rotation
+// at 2 symbols/request fits comfortably inside the shared 8/min credit gate.
 const QUOTES_FRESH_MS = 300_000;
+// Free keyless source: quotes go stale after a few seconds so the watchlist
+// actually fluctuates in real time. Crypto refreshes in one batched Binance
+// call (cheap, no key, no credit cost) and FX rotates through Yahoo.
+const QUOTES_FRESH_FREE_MS = 6_000;
+const FREE_BATCH_MIN_MS = 4_000; // min gap between full crypto batch refreshes (per instance)
+const FREE_FX_BUDGET = 2; // max FX symbols refreshed per request via Yahoo
 // Upstream rate limiter — conservative cap shared by all providers.
 const RATE_MAX = 8;
 const RATE_WINDOW_MS = 60_000;
@@ -132,6 +138,7 @@ const QUOTES_REFRESH_BUDGET = 2;
 
 let tokens = RATE_MAX;
 let lastRefill = Date.now();
+let lastFreeBatchAt = 0;
 
 /** Token-bucket (per-instance, fast): returns true if one credit is available. */
 function canUseCredit(): boolean {
@@ -143,6 +150,19 @@ function canUseCredit(): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Per-instance throttle for the free source: a full crypto batch refresh runs
+ * at most once every few seconds. Binance's public market-data limits are in
+ * the hundreds of calls/minute at ~4 weight/symbol, so even a handful of
+ * concurrent instances stay comfortably inside them.
+ */
+function canUseFreeBatch(): boolean {
+  const now = Date.now();
+  if (now - lastFreeBatchAt < FREE_BATCH_MIN_MS) return false;
+  lastFreeBatchAt = now;
+  return true;
 }
 
 // --- Shared upstream gate ----------------------------------------------------
@@ -1343,6 +1363,63 @@ async function binanceQuote(_apiKey: string, symbol: string): Promise<Quote> {
   }
 }
 
+/**
+ * Real-time crypto quotes in a single batched call. The public Binance `ticker`
+ * (rolling 24h) endpoint accepts a `symbols` array (up to 100) and returns
+ * last/high/low/open/change for all of them — one cheap upstream call
+ * (weight ~4/symbol) keeps the whole crypto watchlist live at a sub-10s cadence
+ * with no API key and no credit cost. Symbols Binance doesn't list simply
+ * aren't returned; the caller falls back to Yahoo for those.
+ */
+async function binanceBatchQuote(symbols: string[]): Promise<Map<string, Quote>> {
+  const out = new Map<string, Quote>();
+  const unique = [...new Set(symbols)];
+  if (unique.length === 0) return out;
+  const reverse = new Map<string, string>();
+  for (const s of unique) reverse.set(binanceSymbol(s), s);
+  const batch = [...reverse.keys()].slice(0, 100);
+  try {
+    const res = await fetch(`${BN_BASE}/ticker?symbols=${encodeURIComponent(JSON.stringify(batch))}`);
+    if (res.status === 429 || res.status === 418) return out;
+    const data = (await res.json().catch(() => null)) as
+      | Array<{
+          symbol?: string;
+          lastPrice?: string;
+          openPrice?: string;
+          highPrice?: string;
+          lowPrice?: string;
+          prevClosePrice?: string;
+          priceChange?: string;
+          priceChangePercent?: string;
+          closeTime?: number;
+        }>
+      | { code?: number; msg?: string }
+      | null;
+    if (!Array.isArray(data)) return out;
+    for (const d of data) {
+      const orig = d.symbol ? reverse.get(d.symbol) : undefined;
+      if (!orig) continue;
+      const price = num(d.lastPrice ?? "");
+      if (price <= 0) continue;
+      out.set(orig, {
+        symbol: orig,
+        price,
+        change: optNum(d.priceChange),
+        percent_change: optNum(d.priceChangePercent),
+        open: optNum(d.openPrice),
+        high: optNum(d.highPrice),
+        low: optNum(d.lowPrice),
+        previous_close: optNum(d.prevClosePrice),
+        is_market_open: true,
+        datetime: d.closeTime ? new Date(d.closeTime).toISOString() : null,
+      });
+    }
+  } catch {
+    // Non-fatal — caller falls back per-symbol to Yahoo.
+  }
+  return out;
+}
+
 /** Crypto OHLC klines from Binance — ascending by time; natively supports 4h/1d. */
 async function binanceTimeSeries(
   _apiKey: string,
@@ -1633,6 +1710,10 @@ async function handleQuotes(providerId: string, apiKey: string, priority: string
   const cache = await cacheGetMany(cacheKeys);
 
   const now = Date.now();
+  const keyless = !!provider.keyless;
+  // Free source quotes go stale after a few seconds so the watchlist fluctuates
+  // in real time; keyed providers stay fresh for 5 minutes to protect credits.
+  const freshMs = keyless ? QUOTES_FRESH_FREE_MS : QUOTES_FRESH_MS;
   const quotes: Quote[] = [];
   let served = 0;
   let anyStale = false;
@@ -1646,7 +1727,7 @@ async function handleQuotes(providerId: string, apiKey: string, priority: string
 
     if (payload && payload.symbol) {
       const age = now - updatedAt;
-      const fresh = age <= QUOTES_FRESH_MS;
+      const fresh = age <= freshMs;
       quotes.push({ ...payload, stale: fresh ? payload.stale : true });
       if (!fresh) anyStale = true;
       served++;
@@ -1670,9 +1751,8 @@ async function handleQuotes(providerId: string, apiKey: string, priority: string
     }
   }
 
-  // 2) Refresh the oldest-stale symbols, up to the per-request budget, only if
-  //    BOTH the local bucket and the shared upstream gate allow. Priority
-  //    symbols (the ones the caller is actively trading / viewing) go first.
+  // 2) Refresh stale symbols. Priority symbols (the ones the caller is actively
+  //    trading / viewing) always go first.
   const prioritySet = new Set(priority.map((s) => s.toUpperCase()));
   toRefresh.sort((a, b) => {
     const ap = prioritySet.has(a.symbol) ? 0 : 1;
@@ -1680,34 +1760,82 @@ async function handleQuotes(providerId: string, apiKey: string, priority: string
     if (ap !== bp) return ap - bp;
     return b.age - a.age;
   });
-  const budget = toRefresh.slice(0, QUOTES_REFRESH_BUDGET);
   let refreshed = 0;
   let upstreamBlocked = false;
 
-  for (const { symbol } of budget) {
-    if (!canUseCredit() || !(await claimUpstreamSlot())) {
-      upstreamBlocked = true;
-      break;
+  const applyQuote = async (symbol: string, q: Quote) => {
+    if (q.error) return false;
+    await cacheSet(`quote:${providerId}:${symbol}`, { ...q, stale: false });
+    const idx = quotes.findIndex((x) => x.symbol === symbol);
+    if (idx >= 0) quotes[idx] = { ...q, stale: false };
+    return true;
+  };
+
+  if (keyless) {
+    // Free source — real-time cadence. All stale crypto refresh in ONE batched
+    // Binance call (sub-10s updates, no key, no credit cost); stale FX rotates
+    // through Yahoo on a light per-instance throttle.
+    const cryptoStale = toRefresh.filter(({ symbol }) => isCryptoSymbol(symbol));
+    const fxStale = toRefresh.filter(({ symbol }) => !isCryptoSymbol(symbol));
+
+    if (cryptoStale.length > 0 && canUseFreeBatch()) {
+      const batch = await binanceBatchQuote(cryptoStale.map((x) => x.symbol));
+      if (batch.size > 0) {
+        for (const [symbol, q] of batch) {
+          if (await applyQuote(symbol, q)) refreshed++;
+        }
+        anyStale = false; // crypto is live again
+      }
+      // Symbols Binance didn't return (or a failed batch) → one-off Yahoo fallback.
+      const missing = cryptoStale.filter(({ symbol }) => !batch.has(symbol));
+      for (const { symbol } of missing) {
+        if (!canUseCredit()) break;
+        const q = await yahooQuote("", symbol);
+        if (await applyQuote(symbol, q)) refreshed++;
+      }
     }
-    try {
-      const q = await provider.fetchQuote(apiKey, symbol);
-      if (!q.error) {
-        await cacheSet(`quote:${providerId}:${symbol}`, { ...q, stale: false });
-        const idx = quotes.findIndex((x) => x.symbol === symbol);
-        if (idx >= 0) quotes[idx] = { ...q, stale: false };
-        anyStale = false; // at least one symbol got fresh data
-        refreshed++;
-      } else if (q.error === "rate_limited") {
+
+    let fxRefreshed = 0;
+    for (const { symbol } of fxStale) {
+      if (fxRefreshed >= FREE_FX_BUDGET) break;
+      if (!canUseCredit()) break;
+      try {
+        const q = await provider.fetchQuote("", symbol);
+        if (await applyQuote(symbol, q)) {
+          refreshed++;
+          fxRefreshed++;
+        }
+      } catch {
+        // keep whatever we had
+      }
+    }
+  } else {
+    // Keyed providers — conservative: a small per-request budget behind the
+    // shared 8/min gate so the provider's credit allowance isn't burned.
+    const budget = toRefresh.slice(0, QUOTES_REFRESH_BUDGET);
+    for (const { symbol } of budget) {
+      if (!canUseCredit() || !(await claimUpstreamSlot())) {
         upstreamBlocked = true;
         break;
-      } else {
-        // Upstream error for this symbol — keep whatever we had.
-        const idx = quotes.findIndex((x) => x.symbol === symbol);
-        if (idx >= 0) quotes[idx] = { ...quotes[idx], error: q.error };
       }
-    } catch {
-      upstreamBlocked = true;
-      break;
+      try {
+        const q = await provider.fetchQuote(apiKey, symbol);
+        if (!q.error) {
+          await applyQuote(symbol, q);
+          anyStale = false; // at least one symbol got fresh data
+          refreshed++;
+        } else if (q.error === "rate_limited") {
+          upstreamBlocked = true;
+          break;
+        } else {
+          // Upstream error for this symbol — keep whatever we had.
+          const idx = quotes.findIndex((x) => x.symbol === symbol);
+          if (idx >= 0) quotes[idx] = { ...quotes[idx], error: q.error };
+        }
+      } catch {
+        upstreamBlocked = true;
+        break;
+      }
     }
   }
 

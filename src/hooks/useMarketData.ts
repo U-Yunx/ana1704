@@ -124,7 +124,7 @@ interface BroadcastMessage {
  * the Edge Function refreshes those symbols first.
  */
 export function useQuotes(
-  pollMs = 30_000,
+  pollMs = 15_000,
   priority?: string[],
 ): UseQuotesState & { refresh: () => void } {
   const [state, setState] = useState<UseQuotesState>({

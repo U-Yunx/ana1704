@@ -304,7 +304,7 @@ export function Trading() {
   // priority symbols — the robot's pairs — first) with polling as a fallback.
   // The free tier keeps the paper robot and manual trading; the live/managed
   // robot still requires an active subscription.
-  const { quotes, kind: marketKind, error: marketError } = useQuotes(30_000, scanPairs)
+  const { quotes, kind: marketKind, error: marketError } = useQuotes(15_000, scanPairs)
   const canRunRobot = access.hasAccess || (mode === 'paper' && access.paperTrading)
   const { tune, update: updateTune, applyPreset, reset: resetTune } = useManualTune()
   const { connections } = useBrokers(user?.id)
