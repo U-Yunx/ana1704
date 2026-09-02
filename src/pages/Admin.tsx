@@ -63,6 +63,7 @@ import {
   updateMarketDataApiKey,
   disconnectMarketData,
   provisionMarketDataFromBroker,
+  activateFreeMarketData,
 } from '../lib/platform'
 import { PAYMENT_METHOD_LABEL } from '../lib/paymentMethods'
 import type {
@@ -1728,6 +1729,7 @@ function MarketDataEditor() {
   const [disconnecting, setDisconnecting] = useState(false)
   const [confirmDisconnect, setConfirmDisconnect] = useState(false)
   const [provisioning, setProvisioning] = useState(false)
+  const [activatingFree, setActivatingFree] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
@@ -1772,10 +1774,12 @@ function MarketDataEditor() {
         { id: 'twelvedata', label: 'Twelve Data', configured: provider === 'twelvedata' && !!configured },
         { id: 'finnhub', label: 'Finnhub', configured: provider === 'finnhub' && !!configured },
         { id: 'oanda', label: 'OANDA', configured: provider === 'oanda' && !!configured, keyless: true, source: 'broker' },
+        { id: 'yahoo', label: 'Free market data', configured: true, keyless: true, source: 'keyless' },
       ]
 
   const selectedOption = providerOptions.find((p) => p.id === provider)
-  const isBrokerSource = selectedOption?.source === 'broker' || selectedOption?.keyless === true
+  const isBrokerSource = selectedOption?.source === 'broker'
+  const isFreeSource = selectedOption?.source === 'keyless'
   const isServingViaFallback = !!activeProvider && !!provider && activeProvider !== provider
 
   const selectProvider = (id: string) => {
@@ -1793,6 +1797,11 @@ function MarketDataEditor() {
     if (isBrokerSource) {
       setMsg(null)
       setErr(`${providerLabel} needs no API key — use the broker account button below to switch the platform to it.`)
+      return
+    }
+    if (isFreeSource) {
+      setMsg(null)
+      setErr(`${providerLabel} is the free, keyless source — kick it in with the button below, no key to paste.`)
       return
     }
     const key = apiKey.trim()
@@ -1856,6 +1865,22 @@ function MarketDataEditor() {
     setTimeout(() => setMsg(null), 6000)
   }
 
+  const activateFree = async () => {
+    setErr(null)
+    setMsg(null)
+    setActivatingFree(true)
+    const res = await activateFreeMarketData()
+    setActivatingFree(false)
+    if (res.error) {
+      setErr(res.error)
+      return
+    }
+    const cfg = res.config ?? (await fetchMarketDataConfig())
+    if (cfg) applyConfig(cfg)
+    setMsg(res.message ?? 'Free market data is now the main source — no API key needed.')
+    setTimeout(() => setMsg(null), 6000)
+  }
+
   const refresh = async () => {
     const cfg = await fetchMarketDataConfig()
     if (cfg) applyConfig(cfg)
@@ -1865,7 +1890,7 @@ function MarketDataEditor() {
     isServingViaFallback && activeProviderLabel
       ? `Serving quotes via ${activeProviderLabel} — your ${providerLabel} feed is down (key, quota or network).`
       : configured
-        ? `Serving quotes via your ${providerLabel}${isBrokerSource ? ' account — no API key' : ' API key'}${fallbackAvailable ? ' — keyless fallback ready' : ''}`
+        ? `Serving quotes via ${providerLabel}${isBrokerSource ? ' — broker account, no API key' : isFreeSource ? ' — free source, no API key' : ' — API key'}${fallbackAvailable ? ' — keyless fallback ready' : ''}`
         : activeProviderLabel
           ? `Serving quotes via ${activeProviderLabel}`
           : 'No market data source — quotes and charts are paused'
@@ -1932,6 +1957,27 @@ function MarketDataEditor() {
                 Use my {providerLabel} account
               </Button>
             </div>
+          ) : isFreeSource ? (
+            <div className="rounded-lg border border-up/30 bg-up/5 p-4">
+              <p className="flex items-center gap-2 text-sm font-medium">
+                <Zap className="h-4 w-4 text-accent" aria-hidden="true" />
+                Free market data — no API key
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                The built-in free source needs no signup and no key: crypto pairs come from Binance&apos;s public feed,
+                forex from Yahoo Finance — all proxied and cached server-side. One click makes it the app&apos;s main
+                market data API.
+              </p>
+              <Button
+                className="mt-3"
+                onClick={() => void activateFree()}
+                loading={activatingFree}
+                disabled={provider === 'yahoo' && activeProvider === 'yahoo'}
+              >
+                <Zap className="h-4 w-4" aria-hidden="true" />
+                {provider === 'yahoo' && activeProvider === 'yahoo' ? 'Free market data is active' : 'Activate free market data'}
+              </Button>
+            </div>
           ) : (
             <>
               <div className="flex gap-2">
@@ -1959,7 +2005,7 @@ function MarketDataEditor() {
                 <Button onClick={() => void save()} loading={saving} disabled={!apiKey.trim()}>
                   {configured ? 'Replace API key' : 'Connect provider'}
                 </Button>
-                {configured && (
+                {configured && !isBrokerSource && !isFreeSource && (
                   <Button
                     variant={confirmDisconnect ? 'danger' : 'secondary'}
                     onClick={() => void disconnect()}
@@ -1985,12 +2031,25 @@ function MarketDataEditor() {
           )}
 
           <p className="text-xs text-muted-foreground">
-            The key is stored server-side and only used inside the market data service — it is never exposed to visitors
-            or sent to the browser. Connecting also makes {providerLabel} the active provider for quotes and charts.{' '}
-            {provider === 'oanda'
-              ? 'OANDA needs no key — quotes come from your connected trading account.'
-              : 'Get a key at ' + (provider === 'finnhub' ? 'finnhub.io' : 'twelvedata.com') + '.'}{' '}
-            Disconnecting pauses market data until you connect again. Changes take effect immediately.
+            {isFreeSource ? (
+              <>
+                Free market data needs no key — crypto quotes come from Binance&apos;s public API and forex from Yahoo
+                Finance, all proxied and cached server-side. It is also the automatic fallback whenever a keyed provider
+                fails, so quotes never stop.
+              </>
+            ) : isBrokerSource ? (
+              <>
+                {providerLabel} needs no key — quotes come from your connected trading account via the market data
+                service.
+              </>
+            ) : (
+              <>
+                The key is stored server-side and only used inside the market data service — it is never exposed to
+                visitors or sent to the browser. Connecting also makes {providerLabel} the active provider for quotes
+                and charts. Get a key at {provider === 'finnhub' ? 'finnhub.io' : 'twelvedata.com'}. Disconnecting
+                pauses market data until you connect again. Changes take effect immediately.
+              </>
+            )}
           </p>
         </div>
       </CardContent>

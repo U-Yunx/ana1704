@@ -1,15 +1,20 @@
 /**
  * Configuration — the robot's trading-style preferences (scalping vs
  * long-term), which pairs it trades, whether it auto-picks the strongest pairs,
- * and overall run profit/loss targets. Persisted to localStorage.
+ * and overall run profit/loss targets. Persisted to localStorage. Also hosts
+ * the one-click free market data source that keeps the app running with no API
+ * key.
  */
-import { Save, SlidersHorizontal, Layers, ShieldCheck } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { RefreshCw, Save, SlidersHorizontal, Layers, ShieldCheck, Zap } from 'lucide-react'
 import { useRobotPrefs, methodLabel } from '../lib/trading/robotPrefs'
 import { WATCHLIST, isCryptoPair } from '../lib/watchlist'
+import { activateFreeMarketData, fetchMarketDataConfig } from '../lib/platform'
+import type { MarketDataConfig } from '../lib/platform'
 import type { TradingMethod } from '../lib/types'
 import type { TradeMode } from '../lib/trading/types'
 import { cn } from '../lib/cn'
-import { Button, Card, CardContent, CardHeader, CardTitle, Input, PageHeader } from '../components/ui'
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, PageHeader } from '../components/ui'
 
 export function Configuration() {
   const {
@@ -46,6 +51,8 @@ export function Configuration() {
       />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <MarketDataCard />
+
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -263,5 +270,114 @@ export function Configuration() {
         </Card>
       </div>
     </div>
+  )
+}
+
+/** Status + one-click activation of the built-in free market data source. */
+function MarketDataCard() {
+  const [cfg, setCfg] = useState<MarketDataConfig | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [activating, setActivating] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const c = await fetchMarketDataConfig()
+    setCfg(c)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const freeActive = cfg?.provider === 'yahoo' || cfg?.active_provider === 'yahoo'
+  const keyedActive = !!cfg && cfg.configured && !freeActive
+  const activeLabel = cfg?.active_provider_label ?? cfg?.provider_label ?? 'Free market data'
+
+  const activate = async () => {
+    setActivating(true)
+    setErr(null)
+    setMsg(null)
+    const res = await activateFreeMarketData()
+    setActivating(false)
+    if (res.error) {
+      setErr(res.error)
+      if (res.config) setCfg(res.config)
+      return
+    }
+    if (res.config) setCfg(res.config)
+    setMsg(res.message ?? 'Free market data is now the main source — quotes, charts and the robot use it automatically.')
+  }
+
+  return (
+    <Card className="lg:col-span-2">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Zap className="h-4 w-4 text-accent" aria-hidden="true" />
+          Market data
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Quotes &amp; charts for the dashboard, signals, backtests and the robot — served through the platform's
+          market data service, nothing runs from your device.
+        </p>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <div className="h-20 animate-pulse rounded-lg border border-border bg-secondary/40" />
+        ) : (
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-medium">{activeLabel}</p>
+                <Badge
+                  className={
+                    freeActive || keyedActive ? 'border-up/40 bg-up/10 text-up' : 'border-amber/40 bg-amber/10 text-amber'
+                  }
+                >
+                  {freeActive || keyedActive ? 'Live' : 'Needs setup'}
+                </Badge>
+              </div>
+              <p className="mt-1 max-w-xl text-xs leading-relaxed text-muted-foreground">
+                {freeActive ? (
+                  <>
+                    Free market data is live — no API key, no signup, $0. Crypto prices come from Binance's public feed
+                    and forex from Yahoo Finance, cached server-side.
+                  </>
+                ) : keyedActive ? (
+                  <>
+                    {activeLabel} is serving quotes right now. The built-in free source (Binance + Yahoo) stays on as
+                    the automatic fallback if that feed ever goes down.
+                  </>
+                ) : (
+                  'No market data source is active yet. One click below starts a free, keyless feed — the app runs immediately.'
+                )}
+              </p>
+            </div>
+            <div className="shrink-0">
+              {freeActive ? (
+                <button
+                  type="button"
+                  onClick={() => void load()}
+                  className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-secondary/40 px-4 py-2 text-sm font-medium text-muted-foreground transition-colors duration-150 hover:text-foreground active:scale-[0.97]"
+                >
+                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                  Check status
+                </button>
+              ) : keyedActive ? (
+                <Badge className="border-border bg-muted text-muted-foreground">Free fallback ready</Badge>
+              ) : (
+                <Button onClick={() => void activate()} loading={activating}>
+                  <Zap className="h-4 w-4" aria-hidden="true" />
+                  Get free market data
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+        {msg && <p className="mt-3 rounded-lg border border-up/40 bg-up/10 px-3 py-2 text-xs text-up">{msg}</p>}
+        {err && <p className="mt-3 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber">{err}</p>}
+      </CardContent>
+    </Card>
   )
 }

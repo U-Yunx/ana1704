@@ -660,11 +660,9 @@ export interface MarketDataConfig {
   fallback_available?: boolean
 }
 
-/** Admin: read which market-data provider is configured (never the key itself). */
-export async function fetchMarketDataConfig(): Promise<MarketDataConfig | null> {
-  const { data, error } = await supabase.functions.invoke('market-data', { body: { action: 'market_config' } })
-  if (error) return null
-  if (data && typeof data === 'object' && 'error' in (data as object)) return null
+/** Shape the raw Edge Function response into the typed config object. */
+function normalizeMarketDataConfig(data: unknown): MarketDataConfig | null {
+  if (!data || typeof data !== 'object' || 'error' in (data as object)) return null
   const cfg = data as Partial<MarketDataConfig>
   return {
     provider: cfg.provider ?? 'twelvedata',
@@ -675,6 +673,13 @@ export async function fetchMarketDataConfig(): Promise<MarketDataConfig | null> 
     active_provider_label: cfg.active_provider_label ?? null,
     fallback_available: Boolean(cfg.fallback_available),
   }
+}
+
+/** Read which market-data provider is configured (never the key itself). */
+export async function fetchMarketDataConfig(): Promise<MarketDataConfig | null> {
+  const { data, error } = await supabase.functions.invoke('market-data', { body: { action: 'market_config' } })
+  if (error) return null
+  return normalizeMarketDataConfig(data)
 }
 
 /**
@@ -728,6 +733,32 @@ export async function provisionMarketDataFromBroker(broker: 'oanda' = 'oanda'): 
     return msg ?? 'Could not set up the broker market data source.'
   }
   return null
+}
+
+/**
+ * One-click "get free market data" (any signed-in user, from the Configuration
+ * page): switches the platform to the built-in keyless source — Binance public
+ * API for crypto + Yahoo Finance for FX. No signup, no API key, $0 forever. It
+ * never overrides a provider that already has a stored API key (the free source
+ * stays the automatic fallback then).
+ */
+export async function activateFreeMarketData(): Promise<{
+  error: string | null
+  message?: string
+  config: MarketDataConfig | null
+}> {
+  const { data, error } = await supabase.functions.invoke('market-data', { body: { action: 'activate_free' } })
+  if (error) return { error: error.message ?? 'Could not enable free market data.', config: null }
+  if (data && typeof data === 'object' && 'error' in (data as object)) {
+    const msg = (data as { message?: string }).message
+    return { error: msg ?? 'Could not enable free market data.', config: null }
+  }
+  const payload = data as { message?: string } | null
+  return {
+    error: null,
+    message: typeof payload?.message === 'string' ? payload.message : undefined,
+    config: normalizeMarketDataConfig(data),
+  }
 }
 
 /** Convenience: read a setting's value object (or a raw default). */

@@ -10,19 +10,24 @@ import { corsHeaders } from "jsr:@supabase/supabase-js@2/cors";
 // caches responses so dashboard polling and repeated signals don't burn the
 // free-tier credit budget.
 //
-// v10 — multiple providers + automatic fallback:
+// v11 — multiple providers + automatic fallback + one-click free source:
 //   * A small provider registry (Twelve Data = default, Finnhub, Alpha Vantage,
-//     Polygon.io) plus a free keyless source (Yahoo Finance) and a broker-derived
-//     source (OANDA — auto-generated from the admin's broker trader account on
-//     the Brokers page) lets an admin pick which provider feeds the platform.
+//     Polygon.io) plus a free keyless source (Binance public API for crypto +
+//     Yahoo Finance for FX) and a broker-derived source (OANDA — auto-generated
+//     from the admin's broker trader account on the Brokers page) lets an admin
+//     pick which provider feeds the platform.
+//   * Any signed-in user can activate the free source from the Configuration
+//     page (`activate_free`) — no signup, no API key. It never overrides a
+//     provider that already has a stored key: the free source simply stays the
+//     automatic fallback in that case.
 //   * Each provider's API key is stored server-side in `app_secrets` under
 //     `market_data_<provider>`, and the active provider is recorded in
 //     `market_data_provider`. Keys are never exposed to the browser.
 //   * Quotes / time-series route through an automatic fallback chain: the
 //     selected provider is tried first, then other configured keyed providers,
-//     then free keyless sources (Yahoo). If the active provider stops working
-//     (expired key, rate limit, upstream error) the next usable provider serves
-//     the request and is persisted as the new active one, so the platform keeps
+//     then free keyless sources. If the active provider stops working (expired
+//     key, rate limit, upstream error) the next usable provider serves the
+//     request and is persisted as the new active one, so the platform keeps
 //     serving market data without manual intervention.
 //   * The cache is namespaced per provider so switching never serves the other
 //     provider's data, and the shared rate gate + in-memory bucket stay as-is.
@@ -56,6 +61,7 @@ const FH_BASE = "https://finnhub.io/api/v1";
 const AV_BASE = "https://www.alphavantage.co/query";
 const POLY_BASE = "https://api.polygon.io";
 const YH_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
+const BN_BASE = "https://api.binance.com/api/v3";
 const OANDA_PRACTICE = "https://api-fxpractice.oanda.com";
 const OANDA_LIVE = "https://api-fxtrade.oanda.com";
 const MAX_OUTPUTSIZE = 5000;
@@ -304,11 +310,36 @@ async function isAdmin(req: Request): Promise<boolean> {
   }
 }
 
-/** Admin: report the selected provider, key state, keyless/broker flags, and active provider. */
-async function handleMarketConfig(): Promise<Response> {
-  const selected = await resolveSelectedProvider();
-  const key = await resolveApiKey(selected);
+/** True when the request carries a real user session JWT (has a `sub` claim). */
+function hasSession(req: Request): boolean {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) return false;
+  const payload = decodeJwtPayload(authHeader.slice("Bearer ".length).trim());
+  return !!payload && typeof payload.sub === "string" && payload.sub.length > 0;
+}
+
+/**
+ * The first provider in the fallback chain that can actually serve data right
+ * now (keyless, or with a stored key). This is the "live" source the UI shows —
+ * it differs from the selected provider when that one can't serve (no key yet,
+ * expired key, etc.).
+ */
+async function resolveActiveProvider(): Promise<{ id: string | null; label: string | null }> {
   const chain = await resolveProviderChain();
+  for (const id of chain) {
+    const p = PROVIDERS[id];
+    if (p.keyless || !!(await resolveApiKey(id))) {
+      return { id, label: p.label };
+    }
+  }
+  return { id: null, label: null };
+}
+
+/** Shared config snapshot: selected provider, key state, and live source. */
+async function configSummary(): Promise<Record<string, unknown>> {
+  const selected = await resolveSelectedProvider();
+  const chain = await resolveProviderChain();
+  const active = await resolveActiveProvider();
   const providers = await Promise.all(
     Object.values(PROVIDERS).map(async (p) => ({
       id: p.id,
@@ -318,14 +349,47 @@ async function handleMarketConfig(): Promise<Response> {
       source: p.source ?? (p.keyless ? "keyless" : "keyed"),
     })),
   );
-  return json({
+  return {
     provider: selected,
     provider_label: PROVIDERS[selected]?.label ?? "Twelve Data",
-    configured: !!key || !!PROVIDERS[selected]?.keyless,
+    configured: providers.find((p) => p.id === selected)?.configured ?? false,
     providers,
-    active_provider: chain[0] ?? selected,
-    active_provider_label: chain[0] ? (PROVIDERS[chain[0]]?.label ?? chain[0]) : null,
+    active_provider: active.id ?? selected,
+    active_provider_label: active.label,
     fallback_available: chain.length > 1,
+  };
+}
+
+/** Report the selected provider, key state, keyless/broker flags, and active provider. */
+async function handleMarketConfig(): Promise<Response> {
+  return json(await configSummary());
+}
+
+/**
+ * One-click free market data (any signed-in user, from the Configuration page):
+ * makes the built-in keyless source (Binance for crypto + Yahoo for FX) the
+ * app's main market data API — no signup, no API key, $0 forever. It never
+ * overrides a provider that already has an API key stored; the free source
+ * stays the automatic fallback in that case.
+ */
+async function handleActivateFree(): Promise<Response> {
+  if (!admin) return json({ error: "internal", message: "Market data service is not configured." }, 500);
+  for (const id of Object.keys(PROVIDERS)) {
+    const p = PROVIDERS[id];
+    if (p.keyless) continue;
+    if (await resolveApiKey(id)) {
+      return json({
+        error: "already_configured",
+        message: `Your platform is already on ${p.label} — free market data stays available as its automatic fallback.`,
+      });
+    }
+  }
+  await admin.from("app_secrets").upsert({ key: "market_data_provider", value: "yahoo" }, { onConflict: "key" });
+  apiKeyCache = null;
+  return json({
+    ok: true,
+    message: "Free market data is now the main source — quotes, charts and the robot use it automatically.",
+    ...(await configSummary()),
   });
 }
 
@@ -1226,6 +1290,119 @@ async function yahooTimeSeries(
   }
 }
 
+// --- Free keyless source (Binance public API for crypto + Yahoo for FX) ------
+/** Map `AAA/BBB` to a Binance spot symbol (crypto pairs on Binance are quoted in USDT). */
+function binanceSymbol(symbol: string): string {
+  const [from, to] = symbol.split("/");
+  if (!from) return symbol;
+  const quote = to && to.trim().toUpperCase() !== "USD" ? to.trim().toUpperCase() : "USDT";
+  return `${from.toUpperCase()}${quote}`;
+}
+
+const BN_INTERVALS: Record<string, string> = {
+  "1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "1h": "1h", "4h": "4h", "1day": "1d",
+};
+
+/** Crypto quote via Binance 24hr ticker (public endpoint, no key, one call per symbol). */
+async function binanceQuote(_apiKey: string, symbol: string): Promise<Quote> {
+  const base: Quote = {
+    symbol, price: null, change: null, percent_change: null, open: null, high: null, low: null,
+    previous_close: null, is_market_open: isMarketOpen(symbol), datetime: null, error: null,
+  };
+  try {
+    const res = await fetch(`${BN_BASE}/ticker/24hr?symbol=${encodeURIComponent(binanceSymbol(symbol))}`);
+    if (res.status === 429 || res.status === 418) return { ...base, error: "rate_limited" };
+    const data = (await res.json().catch(() => null)) as {
+      lastPrice?: string;
+      openPrice?: string;
+      highPrice?: string;
+      lowPrice?: string;
+      prevClosePrice?: string;
+      priceChange?: string;
+      priceChangePercent?: string;
+      closeTime?: number;
+      code?: number;
+    } | null;
+    if (data?.code || typeof data?.lastPrice !== "string") return { ...base, error: "no data" };
+    const price = num(data.lastPrice);
+    if (price <= 0) return { ...base, error: "no data" };
+    return {
+      symbol,
+      price,
+      change: optNum(data.priceChange),
+      percent_change: optNum(data.priceChangePercent),
+      open: optNum(data.openPrice),
+      high: optNum(data.highPrice),
+      low: optNum(data.lowPrice),
+      previous_close: optNum(data.prevClosePrice),
+      is_market_open: true,
+      datetime: data.closeTime ? new Date(data.closeTime).toISOString() : null,
+    };
+  } catch {
+    return { ...base, error: "upstream error" };
+  }
+}
+
+/** Crypto OHLC klines from Binance — ascending by time; natively supports 4h/1d. */
+async function binanceTimeSeries(
+  _apiKey: string,
+  symbol: string,
+  interval: string,
+  outputsize: number,
+  startDate?: string,
+  endDate?: string,
+): Promise<{ bars: Bar[]; error?: string; rateLimited?: boolean }> {
+  const params = new URLSearchParams({ symbol: binanceSymbol(symbol), interval: BN_INTERVALS[interval] ?? "5m" });
+  if (startDate) params.set("startTime", String(new Date(startDate).getTime()));
+  if (endDate) params.set("endTime", String(new Date(endDate).getTime()));
+  params.set("limit", String(Math.min(outputsize, 1000)));
+  try {
+    const res = await fetch(`${BN_BASE}/klines?${params.toString()}`);
+    if (res.status === 429 || res.status === 418) return { bars: [], error: "rate_limited", rateLimited: true };
+    const data = (await res.json().catch(() => null)) as unknown[] | { code?: number } | null;
+    if (!Array.isArray(data) || data.length === 0) return { bars: [], error: "no data" };
+    const bars: Bar[] = (data as Array<Array<number | string>>).map((k) => ({
+      time: new Date(Number(k[0])).toISOString(),
+      open: num(k[1]),
+      high: num(k[2]),
+      low: num(k[3]),
+      close: num(k[4]),
+      volume: k[5] != null ? num(k[5]) : undefined,
+    }));
+    return { bars };
+  } catch {
+    return { bars: [], error: "upstream error" };
+  }
+}
+
+/**
+ * Hybrid free source: crypto → Binance public API with an automatic per-symbol
+ * fallback to Yahoo; FX → Yahoo. Keeps the free tier working even if one of the
+ * free upstreams is unreachable or geo-blocked from the function's region.
+ */
+async function freeQuote(_apiKey: string, symbol: string): Promise<Quote> {
+  if (isCryptoSymbol(symbol)) {
+    const bin = await binanceQuote("", symbol);
+    if (!bin.error && bin.price != null) return bin;
+  }
+  return yahooQuote("", symbol);
+}
+
+async function freeTimeSeries(
+  _apiKey: string,
+  symbol: string,
+  interval: string,
+  outputsize: number,
+  startDate?: string,
+  endDate?: string,
+): Promise<{ bars: Bar[]; error?: string; rateLimited?: boolean }> {
+  if (isCryptoSymbol(symbol)) {
+    const bin = await binanceTimeSeries("", symbol, interval, outputsize, startDate, endDate);
+    if (!bin.error && bin.bars.length > 0) return bin;
+  }
+  return yahooTimeSeries("", symbol, interval, outputsize, startDate, endDate);
+}
+
 // --- OANDA (broker-derived market data, auto-generated) ----------------------
 /** Reads the broker-derived OANDA source (account + env stored when generated). */
 async function oandaSource(): Promise<{ base: string; account: string } | null> {
@@ -1403,14 +1580,14 @@ const PROVIDERS: Record<string, MarketProvider> = {
   },
   yahoo: {
     id: "yahoo",
-    label: "Yahoo Finance",
-    signupUrl: "https://finance.yahoo.com",
+    label: "Free market data",
+    signupUrl: "https://www.binance.com",
     envKey: "",
     keyless: true,
     source: "keyless",
     validate: async () => null,
-    fetchQuote: yahooQuote,
-    fetchTimeSeries: yahooTimeSeries,
+    fetchQuote: freeQuote,
+    fetchTimeSeries: freeTimeSeries,
   },
   oanda: {
     id: "oanda",
@@ -1611,18 +1788,22 @@ Deno.serve(async (req: Request) => {
       return json({ error: "bad_request", message: "Invalid JSON body." }, 400);
     }
 
-    // Admin-only actions: read the configured provider(s), change a key,
-    // disconnect a provider, or generate the market data source from the
-    // caller's broker trader account. These run before the key-exists check so
-    // a key can be configured (or removed) even when none is set yet.
-    if (
-      body.action === "market_config" ||
-      body.action === "set_api_key" ||
-      body.action === "disconnect" ||
-      body.action === "set_broker_source"
-    ) {
+    // Provider status is a safe read for any valid credential (no keys are
+    // ever returned). Signing in is enough to flip the platform to the built-in
+    // free source — this is how non-admin users bootstrap market data from the
+    // Configuration page.
+    if (body.action === "market_config") return await handleMarketConfig();
+    if (body.action === "activate_free") {
+      if (!(await hasSession(req))) return json({ error: "unauthorized" }, 401);
+      return await handleActivateFree();
+    }
+
+    // Admin-only actions: change a provider key, disconnect a provider, or
+    // generate the market data source from the caller's broker trader account.
+    // These run before the key-exists check so a key can be configured (or
+    // removed) even when none is set yet.
+    if (body.action === "set_api_key" || body.action === "disconnect" || body.action === "set_broker_source") {
       if (!(await isAdmin(req))) return json({ error: "unauthorized" }, 401);
-      if (body.action === "market_config") return await handleMarketConfig();
       if (body.action === "disconnect") return await handleDisconnect(String(body.provider ?? "twelvedata"));
       if (body.action === "set_broker_source") return await handleSetBrokerSource(req);
       return await handleSetApiKey(body);
