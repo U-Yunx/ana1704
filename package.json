@@ -7,6 +7,7 @@
     "dev": "vite optimize && vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "vitest run",
     "predeploy": "node scripts/check-deploy-env.mjs",
     "deploy": "npm run build && wrangler pages deploy dist --project-name ana24"
   },
