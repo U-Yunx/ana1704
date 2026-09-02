@@ -1,11 +1,13 @@
 {
-  "name": "my-app",
+  "name": "ana24",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite optimize && vite",
     "build": "vite build",
+    "predeploy": "node scripts/check-corruption.mjs",
+    "deploy": "npm run predeploy && npm run build",
     "preview": "vite preview",
     "test": "vitest run"
   },

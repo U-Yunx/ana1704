@@ -1,101 +1,83 @@
 #!/usr/bin/env node
 /**
- * Pre-deploy corruption guard for ANA24.
+ * ANA24 — Source-tree corruption guard.
  *
- * Scans the source tree for the binary-blob corruption that previously broke
- * production builds. Files that should be UTF-8 text occasionally contained
- * stray control bytes (0x00, 0x1B, …) — the signature of the "30-byte blob"
- * corruption that made `tsconfig.json` and `vite.config.ts` unparseable on the
- * deploy server.
+ * Scans the source tree for stray binary bytes (the signature of the
+ * 30-byte binary-blob corruption that previously broke production builds
+ * of this project). Exits non-zero with a clear report if any file is
+ * corrupted, so a bad file can never ship silently again.
  *
- * This check exits non-zero with a clear report so a corrupted file can never
- * silently ship again. It runs automatically from `npm run predeploy`, which is
- * invoked by BOTH the GitHub Actions CI (`.github/workflows/deploy.yml`, before
- * the build) and the local `npm run deploy`.
- *
- * Usage:
- *   node scripts/check-corruption.mjs [root]
- * (root defaults to the current working directory)
+ * Usage:  node scripts/check-corruption.mjs
+ * Wired:  npm run predeploy (runs in CI before the production build)
  */
-import { readdirSync, statSync, readFileSync } from 'node:fs'
-import { join, extname, relative } from 'node:path'
 
-const ROOT = process.argv[2]
-  ? (process.argv[2].startsWith('/') ? process.argv[2] : join(process.cwd(), process.argv[2]))
-  : process.cwd()
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { join, relative, resolve } from 'node:path'
 
-// Directories never scanned.
-const SKIP_DIRS = new Set([
-  'node_modules',
-  'dist',
-  'dist-ssr',
-  '.git',
-  '.next',
-  'coverage',
-  '.cache',
-])
+const ROOT = resolve(new URL('..', import.meta.url).pathname)
 
-// File extensions allowed to be binary. Everything else is checked as text.
-const BINARY_EXT = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.avif', '.bmp',
-  '.woff', '.woff2', '.ttf', '.otf', '.eot',
-  '.zip', '.gz', '.tar', '.7z', '.pdf',
-  '.mp3', '.mp4', '.webm', '.wasm', '.map',
-])
+// Files to scan — the full source tree plus the root configs that
+// previously carried the corruption.
+const SCAN_PATHS = ['src', 'supabase', 'scripts', 'public', 'index.html', 'vite.config.ts', 'vite-env.d.ts', 'tsconfig.json', 'package.json', 'wrangler.toml']
 
-// Stray control bytes that must never appear inside a UTF-8 source text file.
-// LF (0x0A), CR (0x0D) and TAB (0x09) are legitimate and therefore excluded.
-const BAD = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
+// Files we intentionally skip (binary assets, lockfiles, images, etc.)
+const SKIP_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.svg', '.lock'])
 
-function walk(dir, acc) {
-  for (const name of readdirSync(dir)) {
-    if (SKIP_DIRS.has(name)) continue
-    const full = join(dir, name)
-    const st = statSync(full)
-    if (st.isDirectory()) {
-      walk(full, acc)
-    } else if (st.isFile() && !BINARY_EXT.has(extname(full).toLowerCase())) {
-      acc.push(full)
+const SKIP_FILE = new Set(['package-lock.json'])
+
+// Control characters that are never legitimate in a text source file.
+// Tab (0x09), LF (0x0a) and CR (0x0d) are allowed.
+const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/
+
+function walk(dir, out) {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry)
+    const stat = statSync(full)
+    if (stat.isDirectory()) {
+      if (entry === 'node_modules' || entry === '.git' || entry === 'dist') continue
+      walk(full, out)
+    } else {
+      out.push(full)
     }
   }
-  return acc
 }
 
-const files = walk(ROOT, [])
-const hits = []
+function isSkipped(file) {
+  const ext = file.slice(file.lastIndexOf('.')).toLowerCase()
+  return SKIP_EXT.has(ext) || SKIP_FILE.has(file)
+}
 
-for (const f of files) {
-  const buf = readFileSync(f)
-  // latin1 maps each byte 1:1 to a char, so byte offsets are exact.
-  const text = buf.toString('latin1')
-  const match = BAD.exec(text)
-  if (match) {
-    const start = Math.max(0, match.index - 16)
-    const context = buf
-      .slice(start, match.index + 16)
-      .toString('latin1')
-      .replace(/[^\x20-\x7E]/g, '·')
-    hits.push({
-      file: relative(ROOT, f),
-      offset: match.index,
-      context,
-    })
+const files = []
+for (const p of SCAN_PATHS) {
+  const full = join(ROOT, p)
+  try {
+    if (statSync(full).isDirectory()) walk(full, files)
+    else files.push(full)
+  } catch {
+    // path missing — not a corruption issue
   }
 }
 
-if (hits.length > 0) {
-  console.error('[check-corruption] ✗ Corrupted files found — fix these BEFORE deploying:')
-  for (const h of hits) {
-    console.error(`  - ${h.file}  (byte ${h.offset})  …${h.context}…`)
+const corrupted = []
+
+for (const file of files) {
+  if (isSkipped(file)) continue
+  const buf = readFileSync(file)
+  const text = buf.toString('utf8')
+  // Invalid UTF-8 shows up as U+FFFD replacement characters.
+  if (text.includes('\uFFFD')) {
+    corrupted.push(`${relative(ROOT, file)} — invalid UTF-8`)
+    continue
   }
-  console.error(
-    '\nThese files contain stray binary bytes and will break the build (or ship broken).\n' +
-      'Restore clean content for each file, then re-run this check.',
-  )
+  if (CONTROL_RE.test(text)) {
+    corrupted.push(`${relative(ROOT, file)} — stray binary/control bytes`)
+  }
+}
+
+if (corrupted.length > 0) {
+  console.error('✗ CORRUPTION DETECTED — refusing to ship:')
+  for (const c of corrupted) console.error(`  - ${c}`)
   process.exit(1)
 }
 
-console.log(
-  `[check-corruption] ✓ Clean — ${files.length} source files scanned, no corruption.`,
-)
-process.exit(0)
+console.log(`✓ Clean — scanned ${files.length} files, no corruption.`)
