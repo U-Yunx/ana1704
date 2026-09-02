@@ -1,1 +1,5 @@
-nZ³ı4óÖø×[{ŞsF´mŞÚß–÷½¸ëØì¢
+{
+  "imports": {
+    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2"
+  }
+}
