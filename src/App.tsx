@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-route
 import { ArrowRight, Database } from 'lucide-react'
 import { AuthProvider, useAuth } from './hooks/useAuth'
 import { isSupabaseConfigured } from './lib/supabase'
-import { Layout } from './components/Layout'
+import Layout from './components/Layout'
 
 // Route-level code-splitting: each page becomes its own lazy chunk so the
 // initial load only ships the shell + landing, and heavier pages (trading,
